@@ -1,6 +1,6 @@
 # Source Stream Music Player
 
-<kbd><img src=""></kbd>
+![alt text](https://github.com/credwood/split_audio/blob/main/img/source_stream.png)
 
 ## About
 - The Source Stream music player allows users to import and listen to local audio files and separate them into discrete instruments called stems. The stems can be played individually or in any combination and saved for later use. 

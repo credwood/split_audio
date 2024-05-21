@@ -1,0 +1,6 @@
+.conda
+test.ipynb
+__pycache__
+separated/
+data/
+source_stream.log

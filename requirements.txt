@@ -1,0 +1,6 @@
+# demucs>=4.1.0a2
+git+https://github.com/credwood/demucs.git  # Use git repo as it 4.1.0 hasn't been pushed to PyPI
+dearpygui
+mutagen
+pygame
+kthread

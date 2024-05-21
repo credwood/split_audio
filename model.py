@@ -120,5 +120,6 @@ def separate(result_list, model_name, track, file_type="mp3", one_stem=None, oth
     result_list.append(origin)
     result_list.append(res)
     result_list.append(separator.samplerate)
-       
-    return origin, res, separator.samplerate
+    sr = separator.samplerate
+    del separator
+    return origin, res, sr

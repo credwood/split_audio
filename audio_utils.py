@@ -29,8 +29,9 @@ def set_session_id(name):
 
 @dataclass
 class StreamSession:
-    def __init__(self, name=None, session_id=None, offset=0, index=0, 
-                 playlist = OrderedDict(), play_state = None, 
+    def __init__(self, 
+                 name=None,
+                 playlist = OrderedDict(), 
                  user_vol=0.25,
                  ):
         

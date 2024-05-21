@@ -2,16 +2,18 @@ import argparse
 import atexit
 import logging
 import os
+import threading
 import time
+import webbrowser
 from collections import OrderedDict
+from multiprocessing import Process
+
 
 import dearpygui.dearpygui as dpg
-from demucs.api import save_audio
-import kthread
-from mutagen.mp3 import MP3
 import pygame
+from demucs.api import save_audio
+from mutagen.mp3 import MP3
 from pygame import mixer
-import webbrowser
 
 from audio_utils import remove_stems, StreamSession, load_session, save_session
 from model import separate, save_stems
@@ -21,22 +23,24 @@ from model import separate, save_stems
 logger = logging.getLogger(__name__)
 logging.basicConfig(filename='source_stream.log', level=logging.INFO)
 
-#------------- Thread monitoring Events -------------#
+#------------- Thread monitoring Events and Data Structures -------------#
 
-splitting_event = kthread.threading.Event()
-save_event = kthread.threading.Event()
-curr_stem_pos = kthread.threading.Event()
-stem_pos_therad = {}
+splitting_event = threading.Event()
+save_event = threading.Event()
+save_thread_event = threading.Event()
+curr_stem_pos = threading.Event()
+stem_events = {stem: threading.Event() for stem in ["vocals", "bass", "drums", "piano", "guitar", "other"]}
+stem_pos_thread = {}
 
 #------------- Audio Player Init and Params -------------#
 
 DEFAULT_VOL = 0.25
-dpg.create_context()
 mixer.init()
 mixer.music.set_volume(DEFAULT_VOL)
 
 #------------- Session Init and Params -------------#
 
+dpg.create_context()
 parser = argparse.ArgumentParser()
 parser.add_argument("--name", default="null", help="Unique username. Use to cerate individualized accounts")
 args = parser.parse_args()
@@ -82,7 +86,7 @@ def play(sender=None, app_data=None, user_data=None):
         dpg.configure_item(item="curr_position", max_value=current_audio.info.length)
         dpg.configure_item(item="current_song", show=True, default_value=song_name)
         mixer.music.play()
-        slider_thread = kthread.KThread(target=update_position, name="main_volume").start()
+        slider_thread = threading.Thread(target=update_position, name="main_volume").start()
         if pygame.mixer.music.get_busy():
             dpg.configure_item("play",label="Pause")
             session.PLAY_STATE="playing"
@@ -138,19 +142,24 @@ def load_database():
     session.INDEX = 0
 
 def removeallsongs():
-    session.USER_FILES = {}
+    session.USER_FILES["songs"] = {}
     dpg.delete_item("songs", children_only=True)
     session.PLAYLIST = OrderedDict()
     session.INDEX = 0
+    dpg.configure_item("current_song", default_value="")
+    dpg.hide_item("confirm_clear_songs")
 
 #------------- Stem Splitting and Audio Player Functions -------------#
 
 def init_stem_channels(stems):
     stop_all_stems()
+    stop_all_stem_threads()
+    for stem in session.CHANNELS.keys():
+        dpg.hide_item(stem)
     for n, (name, stem) in enumerate(stems.items()):
-        if name in stem_pos_therad.keys():
-            if stem_pos_therad[name].is_alive():
-                stem_pos_therad[name].terminate()
+        if name in stem_pos_thread.keys():
+            if stem_pos_thread[name].is_alive():
+                stem_events[name].set()
         save_audio(stem, "temp.wav", session.STEM_SAMPLERATE)
         session.CHANNELS[name] = mixer.Channel(n)
         session.PYGAME_SOUNDS[name] = mixer.Sound("temp.wav")
@@ -163,6 +172,7 @@ def init_stem_channels(stems):
 
     remove_stems("temp.wav")
     for stem in stems.keys():
+        stem_events[stem].clear()
         stopwatch_handler(stem)
     dpg.configure_item("now_playing", default_value=f"Stems for: {session.NAME_SPLIT_SONG}")
 
@@ -239,16 +249,11 @@ def set_stem_level(sender, app_data):
             dpg.configure_item(f"{stem}_mute",label="Mute")
         session.STEM_LEVELS[stem] = app_data / 100.0
 
-def update_stem_position(sender, data):
-    while "playing" in session.STEM_PLAY_STATEPLAY_STATE.values() or "paused" in session.STEM_PLAY_STATEPLAY_STATE.values():
-        dpg.configure_item(item=sender,default_value=dpg.get_item_label(sender))
-        time.sleep(0.7)
-
 def stopwatch(seconds, stem):
     start = time.time()
     offset = elapsed = 0.
 
-    while elapsed < float(seconds):
+    while elapsed < float(seconds) and not stem_events[stem].is_set():
         if "stopped" == session.STEM_PLAY_STATE[stem]:
             start = time.time()
             offset = elapsed = 0.
@@ -260,21 +265,23 @@ def stopwatch(seconds, stem):
         elapsed = time.time() - start - offset
         dpg.configure_item(f"{stem}_position", default_value=elapsed)
         time.sleep(.7)
-    return
 
 def stopwatch_handler(stem):
-    if stem in stem_pos_therad.keys() and stem_pos_therad[stem].is_alive():
+    if stem in stem_pos_thread.keys() and stem_pos_thread[stem].is_alive():
         return
-    stem_pos_therad[stem] = None
-    stem_pos_therad[stem] = kthread.KThread(target=stopwatch, args=[session.STEM_LENGTH[stem], stem])
-    stem_pos_therad[stem].start()
+    stem_pos_thread[stem] = None
+    stem_pos_thread[stem] = threading.Thread(target=stopwatch, args=[session.STEM_LENGTH[stem], stem])
+    stem_pos_thread[stem].start()
 
 def init_and_play_saved_stem_channels(data):
+    stop_all_stem_threads()
+    for stem in session.CHANNELS.keys():
+        dpg.hide_item(stem)
     stems = session.USER_FILES["stems"][data]
     for n, (name, stem) in enumerate(stems.items()):
-        if name in stem_pos_therad.keys():
-            if stem_pos_therad[name].is_alive():
-                stem_pos_therad[name].terminate()
+        if name in stem_pos_thread.keys():
+            if stem_pos_thread[name].is_alive():
+                stem_events[name].set()
         session.CHANNELS[name] = mixer.Channel(n)
         session.PYGAME_SOUNDS[name] = mixer.Sound(stem)
         session.STEM_OFFSETS[name] = 0
@@ -288,11 +295,11 @@ def init_and_play_saved_stem_channels(data):
 
     for stem in stems.keys():
         dpg.show_item(stem)
+        stem_events[stem].clear()
         stopwatch_handler(stem)
         
     dpg.configure_item("now_playing", default_value=f"Stems for: {data}")
       
-
 def load_stems():
     stems = session.USER_FILES["stems"]
     return list(stems.keys())
@@ -302,22 +309,40 @@ def load_selected_stems(sender, data):
     if data != "Choose a song":
         init_and_play_saved_stem_channels(data)
             
+def clear_stems():
+    for song in session.USER_FILES["stems"].keys():
+        for stem in session.USER_FILES["stems"][song].values():
+            remove_stems(stem)
+    
+    for ctrl in ["all_play", "all_stop", "save_stems"]:
+        dpg.hide_item(ctrl)
+    for stem in session.CHANNELS.keys():
+        dpg.hide_item(stem)
+        if stem in stem_pos_thread.keys():
+            if stem_pos_thread[stem].is_alive():
+                stem_events[stem].set()
+
+    session.USER_FILES["stems"] = {}
+    dpg.configure_item(items=load_stems(), item="load_stems")
+    dpg.configure_item("now_playing", default_value=f"")
+    dpg.hide_item("confirm_clear")
+
 def stop_all_stem_threads():
-    for stem in stem_pos_therad.keys():
-        if stem_pos_therad[stem].is_alive():
-            stem_pos_therad[stem].terminate()
+    for stem in stem_pos_thread.keys():
+        if stem_pos_thread[stem].is_alive():
+            stem_events[stem].set()
 
 def get_model_selection(sender, data):
-    print(data)
     session.MODEL_SELECTION = data
     return data
 
-def _hyperlink(text, address):
+def hyperlink(text, address):
     b = dpg.add_button(label=text, callback=lambda:webbrowser.open(address))
 
 def split_song():
     splitting_event.clear()
     model = session.MODEL_SELECTION
+    stop_all_stem_threads()
     if model is None:
         dpg.show_item("select_model_pop")
         return 
@@ -327,22 +352,16 @@ def split_song():
         return 
     dpg.configure_item("separate_section", enabled=False)
     results = []
-    sep_thread = kthread.KThread(target=separate, name="separate_thread", args=[results, model, song_path])
+    sep_thread = threading.Thread(target=separate, args=[results, model, song_path])
     sep_thread.start()
     dpg.show_item("splitting")
     while sep_thread.is_alive():
-        if splitting_event.is_set():
-            sep_thread.terminate()
         time.sleep(0.1)
     dpg.hide_item("splitting")
     try:
         session.ORIGINAL_AUDIO, session.STEMS_CACHE, session.STEM_SAMPLERATE = results
     except ValueError:
-        if splitting_event.is_set():
-            logger.info("splitting canceled by user.")
-        else:
-            logger.error("splitting failed.")
-
+        logger.error("splitting failed.")
         dpg.configure_item("separate_section", enabled=True)
         return
         
@@ -353,46 +372,39 @@ def split_song():
     for stem in session.STEMS_CACHE.keys():
         dpg.show_item(stem)  
     dpg.configure_item("now_playing", default_value=f"Stems for: {session.NAME_SPLIT_SONG}")
-    
+    dpg.configure_item("model_used", default_value=model)
     return
 
 def handle_splitting():
-    split_function = kthread.KThread(target=split_song)
+    split_function = threading.Thread(target=split_song)
     split_function.start()
-    splitting_event.clear()
     return
 
 def save_stem_helper():
     save_event.clear()
     song_name = ".".join(session.NAME_SPLIT_SONG.split(".")[:-1])
+    model_used = dpg.get_value("model_used")
+    song_name = model_used + "_" + song_name
     stems_paths = []
-    save_thread = kthread.KThread(target=save_stems, args=[session.ORIGINAL_AUDIO, session.STEMS_CACHE, song_name, session.MODEL_SELECTION, session.STEM_SAMPLERATE, stems_paths])
+    save_thread = threading.Thread(target=save_stems, args=[session.ORIGINAL_AUDIO, session.STEMS_CACHE, song_name, session.MODEL_SELECTION, session.STEM_SAMPLERATE, stems_paths])
     save_thread.start()
     dpg.show_item("saving")
     while save_thread.is_alive():
-        if save_event.is_set():
-            save_thread.terminate()
         time.sleep(0.1)
     dpg.hide_item("saving")
     try:
         stems_paths = stems_paths[0]
     except IndexError:
-        if save_event.is_set():
-            save_event.clear()
-            logger.info("Saving canceled")
-        else:
-            logger.debug("Saving failed.")
+        logger.debug("Saving failed.")
         return
     
-    save_event.clear()
-    session.USER_FILES["stems"][session.NAME_SPLIT_SONG] = stems_paths
+    session.USER_FILES["stems"][song_name] = stems_paths
     dpg.configure_item(items=load_stems(), item="load_stems")
 
 def handle_saving():
-    save_function = kthread.KThread(target=save_stem_helper)
+    save_function = threading.Thread(target=save_stem_helper)
     save_function.start()
     save_event.clear()
-    return
 
 #------------- GUI -------------#
 
@@ -409,7 +421,7 @@ with dpg.window(tag="main",label="window title"):
 
             with dpg.group(horizontal=True):
                 dpg.add_button(label="Import Songs", callback=lambda: dpg.show_item("file_dialog_tag"))
-                dpg.add_button(label="Clear Library", callback=removeallsongs)
+                dpg.add_button(label="Clear Library", callback=lambda: dpg.show_item("confirm_clear_songs"))
             
             dpg.add_separator()
             dpg.add_spacer(height=2)
@@ -437,7 +449,7 @@ with dpg.window(tag="main",label="window title"):
             dpg.add_text("Note that the htdemucs_6s piano source is not working great at the moment.")
             dpg.add_spacer(height=8)
             dpg.add_text("For more information, see the Demucs project README.")
-            _hyperlink("Demucs README", "https://github.com/facebookresearch/demucs/blob/main/README.md")
+            hyperlink("Demucs README", "https://github.com/facebookresearch/demucs/blob/main/README.md")
             dpg.add_button(label="Close", pos=(350, 200), width=100, height=30, callback=lambda: dpg.hide_item("model_info"))
         
         with dpg.window(show=False, modal=True, tag="play_popup", pos=(525, 100)):
@@ -447,6 +459,7 @@ with dpg.window(tag="main",label="window title"):
         with dpg.window(show=False, modal=True, tag="select_model_pop", pos=(525, 100)):
             dpg.add_text("Choose a model.")
             dpg.add_button(label="OK", pos=(50, 60), callback=lambda: dpg.hide_item("select_model_pop"))
+            dpg.add_text("", show=False, tag="model_used")
 
         with dpg.child_window(autosize_x=True, pos=(416, 100), tag="visualizer"):
             dpg.add_text("Separate current track or load saved stems:")
@@ -455,16 +468,17 @@ with dpg.window(tag="main",label="window title"):
             with dpg.group(horizontal=True):
                 dpg.add_combo(["htdemucs", "htdemucs_ft", "htdemucs_6s"],  pos=(10, 50), tag="models", default_value="Choose a model", callback=get_model_selection, width=200)
                 dpg.add_button(label="About Models", tag="get_model_info", pos=(10, 80), width=100, height=20, callback=lambda: dpg.show_item("model_info"))
-                dpg.add_button(label="Separate", tag="separate_section", pos=(250, 50), width=100, height=20, callback=handle_splitting)
-                dpg.add_text("Load saved stems:",  pos=(600, 50))
-                dpg.add_combo(load_stems(), tag="load_stems", default_value="Choose a song", callback=load_selected_stems, width=200, pos=(725, 50))
-            
+                dpg.add_button(label="Separate", tag="separate_section", pos=(250, 50), width=100, height=20, callback=split_song)
+                dpg.add_text("Load saved stems: ",  pos=(550, 50))
+                dpg.add_combo(load_stems(), tag="load_stems", default_value="Choose a song", callback=load_selected_stems, width=200, pos=(680, 50))
+                dpg.add_button(label="Delete Stems", tag="clear_stems", pos=(890, 50), width=100, height=20, callback=lambda: dpg.show_item("confirm_clear"))
+
             dpg.add_spacer(height=12)
 
             with dpg.group(horizontal=True):   
-                dpg.add_button(label="Play All Stems",tag=f"all_play",show=False,callback=play_or_pause_all_stems, pos=(300, 100),width=110,height=30)
-                dpg.add_button(label="Stop Stems",tag=f"all_stop",show=False,callback=stop_all_stems, pos=(415, 100),width=110,height=30)
-                dpg.add_button(label="Save Stems",tag=f"save_stems",show=False,callback=handle_saving, pos=(530, 100),width=110,height=30)
+                dpg.add_button(label="Play All Stems",tag=f"all_play",show=False,callback=play_or_pause_all_stems, pos=(350, 100),width=110,height=30)
+                dpg.add_button(label="Stop Stems",tag=f"all_stop",show=False,callback=stop_all_stems, pos=(465, 100),width=110,height=30)
+                dpg.add_button(label="Save Stems",tag=f"save_stems",show=False,callback=handle_saving, pos=(580, 100),width=110,height=30)
         
             dpg.add_spacer(height=12)
 
@@ -528,14 +542,24 @@ with dpg.window(tag="main",label="window title"):
                         dpg.add_slider_float(tag="other_position", width=350,height=1, format="Other")
 
                     dpg.add_slider_float(tag="other_volume", label="other_volume", width=200,height=30, pos=(800, 10), format="%.0f%.0%",default_value=DEFAULT_VOL * 100, callback=set_stem_level)
+    
+        with dpg.window(show=False, modal=True, tag="confirm_clear_songs", pos=(525, 100)):
+            dpg.add_text("Are you sure you want to delete all songs?")
+            dpg.add_button(label="Cancel", tag="cancel_clear_dong", pos=(90, 60), callback=lambda: dpg.hide_item("confirm_clear_songs"))
+            dpg.add_button(label="Confirm", tag="confirm_clear_song_button", pos=(160, 60), callback=removeallsongs)
+
+        with dpg.window(show=False, modal=True, tag="confirm_clear", pos=(525, 100)):
+            dpg.add_text("Are you sure you want to delete all saved and loaded stems?")
+            dpg.add_button(label="Cancel", tag="cancel_clear_stem", pos=(135, 60), callback=lambda: dpg.hide_item("confirm_clear"))
+            dpg.add_button(label="Confirm", tag="confirm_clear_button", pos=(215, 60), callback=clear_stems)
 
         with dpg.window(show=False, modal=True, tag="saving", pos=(525, 100)):
             dpg.add_text("Saving in progress.")
-            dpg.add_button(label="Cancel", tag="cancel_saving", pos=(50, 60), callback=lambda: save_event.set())
+            #dpg.add_button(label="Cancel", tag="cancel_saving", pos=(50, 60), callback=lambda: save_event.set())
         
         with dpg.window(show=False, modal=True, tag="splitting", pos=(525, 100)):
             dpg.add_text("Splitting in progress.")
-            dpg.add_button(label="Cancel", tag="cancel_splitting", pos=(60, 60), callback=lambda: splitting_event.set())
+            #dpg.add_button(label="Cancel", tag="cancel_splitting", pos=(60, 60), callback=lambda: splitting_event.set())
 
 def safe_exit():
     stop_all_stem_threads()
@@ -546,7 +570,7 @@ def safe_exit():
 
 atexit.register(safe_exit)
 
-dpg.create_viewport(title='Stem Audio Player')
+dpg.create_viewport(title='Source Stream Music Player')
 dpg.setup_dearpygui()
 dpg.show_viewport()
 dpg.set_primary_window("main", True)

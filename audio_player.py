@@ -408,7 +408,7 @@ def handle_saving():
 
 #------------- GUI -------------#
 
-with dpg.window(tag="main",label="window title"):
+with dpg.window(tag="main",label="window title", autosize=True):
     dpg.add_spacer(height=2)
     with dpg.group(horizontal=True):
         with dpg.child_window(width=400,tag="sidebar"):

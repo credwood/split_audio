@@ -4,3 +4,4 @@ __pycache__
 separated/
 data/
 source_stream.log
+.DS_Store

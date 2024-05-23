@@ -49,7 +49,6 @@ python audio_player.py --name user_name
 -  Saved stems will be listed in the dropdown on the right-hand side of the window.
 - The `Clear Library` and `Delete Stems` options currently only allow for deleting every song/stem, selected song deletion unsupported.
 - Because of limitations with the base audio player, the stem progress bars are not interactive.
-- The display does not currently auto-resize widgets based on screen size, the ideal display is full screen on a 13.3 inch display.
 
 ## License
 - Licensed Under [GPL-3.0](https://github.com/credwood/split_audio/blob/main/LICENSE)

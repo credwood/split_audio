@@ -31,6 +31,7 @@ save_thread_event = threading.Event()
 curr_stem_pos = threading.Event()
 stem_events = {stem: threading.Event() for stem in ["vocals", "bass", "drums", "piano", "guitar", "other"]}
 stem_pos_thread = {}
+shutting_down_event = threading.Event()
 
 #------------- Audio Player Init and Params -------------#
 
@@ -58,9 +59,13 @@ def update_volume(sender=None, app_data=None):
         mixer.music.set_volume(app_data / 100.0)
 
 def update_position():
-    while (mixer.music.get_busy() or session.PLAY_STATE != 'paused'):
+    while (mixer.music.get_busy() or session.PLAY_STATE != 'paused') and not shutting_down_event.is_set():
         dpg.configure_item(item="curr_position",default_value=(mixer.music.get_pos()/1000)+session.OFFSET)
         time.sleep(0.7)
+
+def progress_bar_handler():
+    slider_thread = threading.Thread(target=update_position, name="main_position", daemon=True)
+    slider_thread.start()
 
 def global_pos_update(sender, data):
     current = mixer.music.get_pos()/1000 + session.OFFSET
@@ -88,7 +93,6 @@ def play(sender=None, app_data=None, user_data=None):
         dpg.configure_item(item="curr_position", max_value=current_audio.info.length)
         dpg.configure_item(item="current_song", show=True, default_value=song_name)
         mixer.music.play()
-        slider_thread = threading.Thread(target=update_position, name="main_volume", daemon=True).start()
         if mixer.music.get_busy():
             dpg.configure_item("play",label="Pause")
             session.PLAY_STATE="playing"
@@ -106,8 +110,13 @@ def play_or_pause():
     elif session.PLAY_STATE == "stopped":
         dpg.configure_item("play",label="Pause")
         session.PLAY_STATE = "playing"
+        restart_song()
     else:
         dpg.show_item("play_popup")
+
+def restart_song():
+    prev_song = list(session.PLAYLIST.keys())[session.INDEX]
+    play(user_data=[prev_song, session.PLAYLIST[prev_song]])
 
 def previous_song():
     prev_song = list(session.PLAYLIST.keys())[session.INDEX-1]
@@ -567,6 +576,7 @@ with dpg.window(tag="main",label="window title", autosize=True):
 def safe_exit():
     stop_all_stem_threads()
     save_session(session)
+    shutting_down_event.set()
     mixer.music.stop()
     pygame.quit()
 
@@ -578,13 +588,14 @@ dpg.setup_dearpygui()
 dpg.show_viewport()
 dpg.set_primary_window("main", True)
 dpg.maximize_viewport()
+progress_bar_handler()
 #dpg.start_dearpygui()
 # below replaces, start_dearpygui()
 while dpg.is_dearpygui_running():
     # insert here any code you would like to run in the render loop
     # you can manually stop by using stop_dearpygui()
     for event in pygame.event.get():
-        if event.type == MUSIC_END:
+        if event.type == MUSIC_END and session.PLAY_STATE == "playing":
             next_song()
     dpg.render_dearpygui_frame()
 dpg.destroy_context()

@@ -35,8 +35,10 @@ stem_pos_thread = {}
 #------------- Audio Player Init and Params -------------#
 
 DEFAULT_VOL = 0.25
+pygame.init()
 mixer.init()
 mixer.music.set_volume(DEFAULT_VOL)
+MUSIC_END = pygame.USEREVENT+1
 
 #------------- Session Init and Params -------------#
 
@@ -86,10 +88,11 @@ def play(sender=None, app_data=None, user_data=None):
         dpg.configure_item(item="curr_position", max_value=current_audio.info.length)
         dpg.configure_item(item="current_song", show=True, default_value=song_name)
         mixer.music.play()
-        slider_thread = threading.Thread(target=update_position, name="main_volume").start()
-        if pygame.mixer.music.get_busy():
+        slider_thread = threading.Thread(target=update_position, name="main_volume", daemon=True).start()
+        if mixer.music.get_busy():
             dpg.configure_item("play",label="Pause")
             session.PLAY_STATE="playing"
+            mixer.music.set_endevent(MUSIC_END)
 
 def play_or_pause():        
     if session.PLAY_STATE == "playing":
@@ -575,5 +578,13 @@ dpg.setup_dearpygui()
 dpg.show_viewport()
 dpg.set_primary_window("main", True)
 dpg.maximize_viewport()
-dpg.start_dearpygui()
+#dpg.start_dearpygui()
+# below replaces, start_dearpygui()
+while dpg.is_dearpygui_running():
+    # insert here any code you would like to run in the render loop
+    # you can manually stop by using stop_dearpygui()
+    for event in pygame.event.get():
+        if event.type == MUSIC_END:
+            next_song()
+    dpg.render_dearpygui_frame()
 dpg.destroy_context()
